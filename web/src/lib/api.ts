@@ -37,6 +37,21 @@ export type Account = {
   image_inflight?: number;
   last_used_at?: string | null;
   proxy?: string | null;
+  /** Stable app-owned identifier used for user-key image routing. */
+  pool_account_id?: string;
+  stable_account_id?: string;
+};
+
+export type ImageRouteAccount = {
+  pool_account_id: string;
+  id?: string;
+  stable_account_id?: string;
+  account_id?: string | null;
+  email?: string | null;
+  type?: string | null;
+  source_type?: string | null;
+  status: AccountStatus;
+  quota: number;
 };
 
 export type AccountImportPayload = {
@@ -317,6 +332,24 @@ export type UserKey = {
   enabled: boolean;
   created_at: string | null;
   last_used_at: string | null;
+  daily_quota: number | null;
+  weekly_quota: number | null;
+  total_quota: number | null;
+  daily_used: number;
+  weekly_used: number;
+  total_used: number;
+  lifetime_used: number;
+  route_account_ids: string[];
+};
+
+export type UserUsage = {
+  lifetime_used: number;
+  daily: { used: number; limit: number | null; remaining: number | null; reset_at: string | null };
+  weekly: { used: number; limit: number | null; remaining: number | null; reset_at: string | null };
+  total: { used: number; limit: number | null; remaining: number | null };
+  blocked: boolean;
+  reason: string | null;
+  route_account_ids: string[];
 };
 
 export async function login(authKey: string) {
@@ -333,6 +366,10 @@ export async function login(authKey: string) {
 
 export async function fetchAccounts() {
   return httpRequest<AccountListResponse>("/api/accounts");
+}
+
+export async function fetchImageRouteAccounts() {
+  return httpRequest<{ items: ImageRouteAccount[] }>("/api/accounts/routes");
 }
 
 export async function fetchModels() {
@@ -677,14 +714,32 @@ export async function fetchUserKeys() {
   return httpRequest<{ items: UserKey[] }>("/api/auth/users");
 }
 
-export async function createUserKey(name: string) {
+export async function fetchMyUsage() {
+  return httpRequest<UserUsage>("/api/auth/me/usage");
+}
+
+export async function createUserKey(payload: {
+  name?: string;
+  daily_quota?: number | null;
+  weekly_quota?: number | null;
+  total_quota?: number | null;
+  route_account_ids?: string[];
+}) {
   return httpRequest<{ item: UserKey; key: string; items: UserKey[] }>("/api/auth/users", {
     method: "POST",
-    body: { name },
+    body: payload,
   });
 }
 
-export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string; key?: string }) {
+export async function updateUserKey(keyId: string, updates: {
+  enabled?: boolean;
+  name?: string;
+  key?: string;
+  daily_quota?: number | null;
+  weekly_quota?: number | null;
+  total_quota?: number | null;
+  route_account_ids?: string[];
+}) {
   return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "POST",
     body: updates,

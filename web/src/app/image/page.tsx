@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import {
   createImageEditTask,
   createImageGenerationTask,
+  fetchMyUsage,
   fetchAccounts,
   fetchModels,
   fetchImageTasks,
@@ -28,6 +29,7 @@ import {
   type ImageModel,
   type Model,
   type ImageTask,
+  type UserUsage,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { useSettingsStore } from "@/app/settings/store";
@@ -77,6 +79,13 @@ function saveScrollPositions(positions: Map<string, number>) {
   } catch {
     // sessionStorage may be full or unavailable
   }
+}
+
+function formatUsageReset(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", { timeZone: "America/New_York", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
 }
 
 function clampImageCount(value: string) {
@@ -478,6 +487,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [availableQuota, setAvailableQuota] = useState("加载中...");
+  const [userUsage, setUserUsage] = useState<UserUsage | null>(null);
   const [lightboxImages, setLightboxImages] = useState<ImageLightboxItem[]>([]);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -729,6 +739,14 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
   }, [isAdmin]);
 
+  const loadUserUsage = useCallback(async () => {
+    try {
+      setUserUsage(await fetchMyUsage());
+    } catch {
+      setUserUsage(null);
+    }
+  }, []);
+
   useEffect(() => {
     if (didLoadQuotaRef.current) {
       return;
@@ -737,14 +755,23 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
     const handleFocus = () => {
       void loadQuota();
+      void loadUserUsage();
     };
 
     void loadQuota();
+    void loadUserUsage();
     window.addEventListener("focus", handleFocus);
     return () => {
       window.removeEventListener("focus", handleFocus);
     };
-  }, [isAdmin, loadQuota]);
+  }, [isAdmin, loadQuota, loadUserUsage]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void loadUserUsage();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [loadUserUsage]);
 
   // 切换会话时保存旧会话滚动位置，并隐藏容器防止闪烁
   useLayoutEffect(() => {
@@ -1611,6 +1638,32 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <>
+      <div className="mx-auto flex w-full max-w-[1380px] justify-end px-3 pt-2 sm:px-6 sm:pt-3">
+        <div className="rounded-2xl border border-stone-200/80 bg-white/90 px-4 py-2 text-right text-xs text-stone-600 shadow-sm backdrop-blur">
+          <div className="flex items-center justify-end gap-3">
+            <span>历史用量 <strong className="text-stone-900">{userUsage?.lifetime_used ?? "—"}</strong> 张</span>
+            <span>剩余额度 <strong className={userUsage?.blocked ? "text-rose-600" : "text-emerald-600"}>
+              {userUsage
+                ? (() => {
+                    const values = [userUsage.daily.remaining, userUsage.weekly.remaining, userUsage.total.remaining]
+                      .filter((value): value is number => value != null);
+                    return values.length ? Math.min(...values) : "不限";
+                  })()
+                : "—"}
+            </strong></span>
+          </div>
+          {userUsage && (userUsage.daily.limit != null || userUsage.weekly.limit != null) ? (
+            <div className="mt-1 text-[11px] text-stone-400">
+              {userUsage.daily.limit != null && userUsage.weekly.limit != null
+                ? `每日 ${formatUsageReset(userUsage.daily.reset_at)}、每周 ${formatUsageReset(userUsage.weekly.reset_at)} 重置（美东时间）`
+                : userUsage.daily.limit != null
+                  ? `每日 ${formatUsageReset(userUsage.daily.reset_at)} 重置（美东时间）`
+                  : `每周 ${formatUsageReset(userUsage.weekly.reset_at)} 重置（美东时间）`}
+            </div>
+          ) : null}
+          {userUsage?.blocked ? <div className="mt-1 text-rose-600">{userUsage.reason || "额度已用尽"}</div> : null}
+        </div>
+      </div>
       <section className="mx-auto grid h-[calc(100dvh-6.5rem)] min-h-0 w-full max-w-[1380px] grid-cols-1 gap-2 overflow-hidden px-0 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:h-[calc(100dvh-5.25rem)] sm:gap-3 sm:px-3 sm:pb-6 lg:grid-cols-[240px_minmax(0,1fr)]">
         <div className="hidden h-full min-h-0 border-r border-stone-200/70 pr-3 lg:block">
           <ImageSidebar

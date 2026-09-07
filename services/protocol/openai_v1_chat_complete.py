@@ -16,7 +16,10 @@ from services.protocol.conversation import (
     count_message_text_tokens,
     count_text_tokens,
     encode_images,
+    image_request_identity,
     normalize_messages,
+    reserve_image_request,
+    settle_image_outputs,
     stream_image_outputs_with_pool,
     stream_text_deltas,
     text_backend,
@@ -231,13 +234,18 @@ def image_result_content(result: dict[str, Any]) -> str:
 
 def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
     model, prompt, n, images = chat_image_args(body)
-    result = collect_image_outputs(stream_image_outputs_with_pool(ConversationRequest(
+    identity = image_request_identity(body)
+    route_account_ids = list(identity.get("route_account_ids") or []) if identity else []
+    reservation = reserve_image_request(body, n)
+    result = collect_image_outputs(settle_image_outputs(stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
         n=n,
         response_format="b64_json",
         images=encode_images(images) or None,
-    )))
+        identity=identity,
+        route_account_ids=route_account_ids,
+    )), reservation))
     response = completion_response(model, image_result_content(result), int(result.get("created") or 0) or None)
     usage = image_usage(
         input_text_tokens=count_text_tokens(prompt, model),
@@ -250,13 +258,18 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
 
 def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     model, prompt, n, images = chat_image_args(body)
-    image_outputs = stream_image_outputs_with_pool(ConversationRequest(
+    identity = image_request_identity(body)
+    route_account_ids = list(identity.get("route_account_ids") or []) if identity else []
+    reservation = reserve_image_request(body, n)
+    image_outputs = settle_image_outputs(stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
         n=n,
         response_format="b64_json",
         images=encode_images(images) or None,
-    ))
+        identity=identity,
+        route_account_ids=route_account_ids,
+    )), reservation)
     yield from stream_image_chat_completion(image_outputs, model)
 
 

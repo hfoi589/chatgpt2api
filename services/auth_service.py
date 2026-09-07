@@ -37,6 +37,44 @@ class AuthService:
     def _default_name(role: object) -> str:
         return "管理员密钥" if str(role or "").strip().lower() == "admin" else "普通用户"
 
+    @staticmethod
+    def _optional_quota(value: object) -> int | None:
+        """Normalize a quota value while preserving an empty value as unlimited."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("额度必须是非负整数，留空表示不限制") from exc
+        if parsed < 0:
+            raise ValueError("额度必须是非负整数，留空表示不限制")
+        return parsed
+
+    @classmethod
+    def _normalize_quota_fields(cls, raw: dict[str, object]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for field in ("daily_quota", "weekly_quota", "total_quota"):
+            try:
+                result[field] = cls._optional_quota(raw.get(field))
+            except ValueError:
+                result[field] = None
+        for field in ("daily_used", "weekly_used", "total_used", "lifetime_used"):
+            try:
+                result[field] = max(0, int(raw.get(field) or 0))
+            except (TypeError, ValueError):
+                result[field] = 0
+        result["daily_window_start"] = str(raw.get("daily_window_start") or "").strip() or None
+        result["weekly_window_start"] = str(raw.get("weekly_window_start") or "").strip() or None
+        try:
+            result["usage_migration_version"] = max(0, int(raw.get("usage_migration_version") or 0))
+        except (TypeError, ValueError):
+            result["usage_migration_version"] = 0
+        routes = raw.get("route_account_ids")
+        if not isinstance(routes, list):
+            routes = []
+        result["route_account_ids"] = list(dict.fromkeys(str(item).strip() for item in routes if str(item).strip()))
+        return result
+
     def _normalize_item(self, raw: object) -> dict[str, object] | None:
         if not isinstance(raw, dict):
             return None
@@ -50,7 +88,7 @@ class AuthService:
         name = self._clean(raw.get("name")) or self._default_name(role)
         created_at = self._clean(raw.get("created_at")) or _now_iso()
         last_used_at = self._clean(raw.get("last_used_at")) or None
-        return {
+        item = {
             "id": item_id,
             "name": name,
             "role": role,
@@ -59,6 +97,8 @@ class AuthService:
             "created_at": created_at,
             "last_used_at": last_used_at,
         }
+        item.update(self._normalize_quota_fields(raw))
+        return item
 
     def _load(self) -> list[dict[str, object]]:
         try:
@@ -84,6 +124,16 @@ class AuthService:
             "enabled": bool(item.get("enabled", True)),
             "created_at": item.get("created_at"),
             "last_used_at": item.get("last_used_at"),
+            "daily_quota": item.get("daily_quota"),
+            "weekly_quota": item.get("weekly_quota"),
+            "total_quota": item.get("total_quota"),
+            "daily_used": int(item.get("daily_used") or 0),
+            "weekly_used": int(item.get("weekly_used") or 0),
+            "total_used": int(item.get("total_used") or 0),
+            "lifetime_used": int(item.get("lifetime_used") or 0),
+            "daily_window_start": item.get("daily_window_start"),
+            "weekly_window_start": item.get("weekly_window_start"),
+            "route_account_ids": list(item.get("route_account_ids") or []),
         }
 
     def list_keys(self, role: AuthRole | None = None) -> list[dict[str, object]]:
@@ -147,7 +197,16 @@ class AuthService:
             raise ValueError("这个名称已经在使用中了，换一个更容易区分的名称吧")
         return candidate
 
-    def create_key(self, *, role: AuthRole, name: str = "") -> tuple[dict[str, object], str]:
+    def create_key(
+        self,
+        *,
+        role: AuthRole,
+        name: str = "",
+        daily_quota: object = None,
+        weekly_quota: object = None,
+        total_quota: object = None,
+        route_account_ids: list[str] | None = None,
+    ) -> tuple[dict[str, object], str]:
         with self._lock:
             self._reload_locked()
             normalized_name = self._build_name_locked(name, role=role)
@@ -166,6 +225,17 @@ class AuthService:
                 "enabled": True,
                 "created_at": _now_iso(),
                 "last_used_at": None,
+                "daily_quota": self._optional_quota(daily_quota),
+                "weekly_quota": self._optional_quota(weekly_quota),
+                "total_quota": self._optional_quota(total_quota),
+                "daily_used": 0,
+                "weekly_used": 0,
+                "total_used": 0,
+                "lifetime_used": 0,
+                "daily_window_start": None,
+                "weekly_window_start": None,
+                "usage_migration_version": 0,
+                "route_account_ids": list(dict.fromkeys(str(item).strip() for item in (route_account_ids or []) if str(item).strip())),
             }
             self._items.append(item)
             self._save()
@@ -200,9 +270,60 @@ class AuthService:
                     next_item["enabled"] = bool(updates.get("enabled"))
                 if "key" in updates and updates.get("key") is not None:
                     next_item["key_hash"] = self._build_key_hash_locked(str(updates.get("key") or ""), exclude_id=normalized_id)
+                for field in ("daily_quota", "weekly_quota", "total_quota"):
+                    if field in updates:
+                        next_item[field] = self._optional_quota(updates.get(field))
+                if "route_account_ids" in updates:
+                    routes = updates.get("route_account_ids")
+                    if routes is None:
+                        routes = []
+                    if not isinstance(routes, list):
+                        raise ValueError("账号路由必须是账号 ID 列表")
+                    next_item["route_account_ids"] = list(dict.fromkeys(str(item).strip() for item in routes if str(item).strip()))
                 self._items[index] = next_item
                 self._save()
                 return self._public_item(next_item)
+        return None
+
+    def get_key_for_usage(self, key_id: str) -> dict[str, object] | None:
+        """Return a mutable-safe snapshot for quota accounting."""
+        normalized_id = self._clean(key_id)
+        if not normalized_id:
+            return None
+        with self._lock:
+            self._reload_locked()
+            for item in self._items:
+                if self._clean(item.get("id")) == normalized_id:
+                    return dict(item)
+        return None
+
+    def list_key_snapshots(self) -> list[dict[str, object]]:
+        with self._lock:
+            self._reload_locked()
+            return [dict(item) for item in self._items]
+
+    def mutate_usage_item(self, key_id: str, mutator) -> dict[str, object] | None:
+        """Atomically mutate usage fields and persist the user key."""
+        normalized_id = self._clean(key_id)
+        if not normalized_id:
+            return None
+        with self._lock:
+            self._reload_locked()
+            for index, item in enumerate(self._items):
+                if self._clean(item.get("id")) != normalized_id:
+                    continue
+                next_item = dict(item)
+                result = mutator(next_item)
+                if result is None:
+                    return None
+                normalized = self._normalize_item(result)
+                if normalized is None:
+                    return None
+                changed = normalized != item
+                self._items[index] = normalized
+                if changed:
+                    self._save()
+                return dict(normalized)
         return None
 
     def delete_key(self, key_id: str, *, role: AuthRole | None = None) -> bool:

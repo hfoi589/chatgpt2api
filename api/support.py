@@ -52,8 +52,8 @@ def resolve_image_base_url(request: Request) -> str:
 
 def raise_image_quota_error(exc: Exception) -> None:
     message = str(exc)
-    if "no available image quota" in message.lower():
-        raise HTTPException(status_code=429, detail={"error": "no available image quota"}) from exc
+    if "no available image quota" in message.lower() or "assigned route" in message.lower() or "额度" in message:
+        raise HTTPException(status_code=429, detail={"error": message}) from exc
     raise HTTPException(status_code=502, detail={"error": message}) from exc
 
 

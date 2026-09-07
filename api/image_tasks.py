@@ -9,6 +9,7 @@ from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request
 from services.image_task_service import image_task_service
 from services.log_service import LoggedCall
+from services.quota_service import QuotaExceededError
 
 
 class ImageGenerationTaskRequest(BaseModel):
@@ -65,6 +66,8 @@ def create_router() -> APIRouter:
                 quality=body.quality,
                 base_url=resolve_image_base_url(request),
             )
+        except QuotaExceededError as exc:
+            raise HTTPException(status_code=429, detail={"error": str(exc), "code": "insufficient_quota"}) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
@@ -96,6 +99,8 @@ def create_router() -> APIRouter:
                 images=images,
                 masks=masks,
             )
+        except QuotaExceededError as exc:
+            raise HTTPException(status_code=429, detail={"error": str(exc), "code": "insufficient_quota"}) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 

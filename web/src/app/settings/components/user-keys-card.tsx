@@ -16,7 +16,34 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { createUserKey, deleteUserKey, fetchUserKeys, updateUserKey, type UserKey } from "@/lib/api";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  createUserKey,
+  deleteUserKey,
+  fetchImageRouteAccounts,
+  fetchUserKeys,
+  updateUserKey,
+  type ImageRouteAccount,
+  type UserKey,
+} from "@/lib/api";
+
+function parseQuota(value: string) {
+  const normalized = value.trim();
+  if (!normalized) return null;
+  const parsed = Number(normalized);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error("额度必须是非负整数，留空表示不限制");
+  }
+  return parsed;
+}
+
+function quotaText(value: number | null | undefined) {
+  return value == null ? "" : String(value);
+}
+
+function routeLabel(account: ImageRouteAccount) {
+  return account.email || account.account_id || account.pool_account_id;
+}
 
 function formatDateTime(value?: string | null) {
   if (!value) {
@@ -38,9 +65,14 @@ function formatDateTime(value?: string | null) {
 export function UserKeysCard() {
   const didLoadRef = useRef(false);
   const [items, setItems] = useState<UserKey[]>([]);
+  const [routeAccounts, setRouteAccounts] = useState<ImageRouteAccount[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [name, setName] = useState("");
+  const [dailyQuota, setDailyQuota] = useState("");
+  const [weeklyQuota, setWeeklyQuota] = useState("");
+  const [totalQuota, setTotalQuota] = useState("");
+  const [routeAccountIds, setRouteAccountIds] = useState<string[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
   const [revealedKey, setRevealedKey] = useState("");
@@ -48,12 +80,22 @@ export function UserKeysCard() {
   const [editingItem, setEditingItem] = useState<UserKey | null>(null);
   const [editName, setEditName] = useState("");
   const [editKey, setEditKey] = useState("");
+  const [editDailyQuota, setEditDailyQuota] = useState("");
+  const [editWeeklyQuota, setEditWeeklyQuota] = useState("");
+  const [editTotalQuota, setEditTotalQuota] = useState("");
+  const [editRouteAccountIds, setEditRouteAccountIds] = useState<string[]>([]);
 
   const load = async () => {
     setIsLoading(true);
     try {
       const data = await fetchUserKeys();
       setItems(data.items);
+      try {
+        const routes = await fetchImageRouteAccounts();
+        setRouteAccounts(routes.items);
+      } catch {
+        setRouteAccounts([]);
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载用户密钥失败");
     } finally {
@@ -72,10 +114,20 @@ export function UserKeysCard() {
   const handleCreate = async () => {
     setIsCreating(true);
     try {
-      const data = await createUserKey(name.trim());
+      const data = await createUserKey({
+        name: name.trim(),
+        daily_quota: parseQuota(dailyQuota),
+        weekly_quota: parseQuota(weeklyQuota),
+        total_quota: parseQuota(totalQuota),
+        route_account_ids: routeAccountIds,
+      });
       setItems(data.items);
       setRevealedKey(data.key);
       setName("");
+      setDailyQuota("");
+      setWeeklyQuota("");
+      setTotalQuota("");
+      setRouteAccountIds([]);
       setIsDialogOpen(false);
       toast.success("用户密钥已创建");
     } catch (error) {
@@ -132,6 +184,10 @@ export function UserKeysCard() {
     setEditingItem(item);
     setEditName(item.name);
     setEditKey("");
+    setEditDailyQuota(quotaText(item.daily_quota));
+    setEditWeeklyQuota(quotaText(item.weekly_quota));
+    setEditTotalQuota(quotaText(item.total_quota));
+    setEditRouteAccountIds(item.route_account_ids || []);
   };
 
   const handleEdit = async () => {
@@ -141,7 +197,11 @@ export function UserKeysCard() {
     const item = editingItem;
     const trimmedName = editName.trim();
     const trimmedKey = editKey.trim();
-    if (trimmedName === item.name && !trimmedKey) {
+    if (trimmedName === item.name && !trimmedKey &&
+      editDailyQuota === quotaText(item.daily_quota) &&
+      editWeeklyQuota === quotaText(item.weekly_quota) &&
+      editTotalQuota === quotaText(item.total_quota) &&
+      JSON.stringify(editRouteAccountIds) === JSON.stringify(item.route_account_ids || [])) {
       setEditingItem(null);
       return;
     }
@@ -150,11 +210,15 @@ export function UserKeysCard() {
       const data = await updateUserKey(item.id, {
         ...(trimmedName !== item.name ? { name: trimmedName } : {}),
         ...(trimmedKey ? { key: trimmedKey } : {}),
+        daily_quota: parseQuota(editDailyQuota),
+        weekly_quota: parseQuota(editWeeklyQuota),
+        total_quota: parseQuota(editTotalQuota),
+        route_account_ids: editRouteAccountIds,
       });
       setItems(data.items);
       setEditingItem(null);
       setEditKey("");
-      toast.success(trimmedKey ? "用户密钥已更新" : "用户名称已更新");
+      toast.success("用户密钥配置已更新");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "更新用户密钥失败");
     } finally {
@@ -233,6 +297,13 @@ export function UserKeysCard() {
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500">
                         <span>创建时间 {formatDateTime(item.created_at)}</span>
                         <span>最近使用 {formatDateTime(item.last_used_at)}</span>
+                        <span>历史用量 {item.lifetime_used} 张</span>
+                        <span>每日 {item.daily_quota == null ? "不限" : `${item.daily_used}/${item.daily_quota}`}</span>
+                        <span>每周 {item.weekly_quota == null ? "不限" : `${item.weekly_used}/${item.weekly_quota}`}</span>
+                        <span>总额度 {item.total_quota == null ? "不限" : `剩余 ${item.total_quota}（已用 ${item.total_used}）`}</span>
+                      </div>
+                      <div className="text-xs text-stone-500">
+                        图片路由：{item.route_account_ids?.length ? `${item.route_account_ids.length} 个指定账号` : "全局号池"}
                       </div>
                     </div>
 
@@ -283,11 +354,11 @@ export function UserKeysCard() {
       </Card>
 
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <DialogContent className="rounded-2xl p-6">
+        <DialogContent className="max-h-[90vh] overflow-y-auto rounded-2xl p-6">
           <DialogHeader className="gap-2">
             <DialogTitle>创建用户密钥</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              可选填写一个备注名称，方便区分不同使用者；创建后会生成一条只能查看一次的原始密钥。
+              可选填写额度和账号路由；留空表示该项不限制。总额度是可用余额，成功生成图片后会直接扣减。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
@@ -298,6 +369,41 @@ export function UserKeysCard() {
               placeholder="例如：设计同学 A、运营临时账号"
               className="h-11 rounded-xl border-stone-200 bg-white"
             />
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            {[
+              ["每日额度", dailyQuota, setDailyQuota],
+              ["每周额度", weeklyQuota, setWeeklyQuota],
+              ["总额度", totalQuota, setTotalQuota],
+            ].map(([label, value, setter]) => (
+              <div className="space-y-2" key={String(label)}>
+                <label className="text-sm font-medium text-stone-700">{String(label)}（可选）</label>
+                <Input
+                  inputMode="numeric"
+                  value={String(value)}
+                  onChange={(event) => (setter as (value: string) => void)(event.target.value)}
+                  placeholder="不限"
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+            ))}
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-stone-700">图片账号路由（可多选，留空使用全局号池）</label>
+            <div className="max-h-36 space-y-2 overflow-y-auto rounded-xl border border-stone-200 bg-stone-50 p-3">
+              {routeAccounts.length ? routeAccounts.map((account) => (
+                <label key={account.pool_account_id} className="flex items-center gap-2 text-sm text-stone-700">
+                  <Checkbox
+                    checked={routeAccountIds.includes(account.pool_account_id)}
+                    onCheckedChange={(checked) => setRouteAccountIds((current) => checked
+                      ? [...current, account.pool_account_id]
+                      : current.filter((id) => id !== account.pool_account_id))}
+                  />
+                  <span className="min-w-0 truncate">{routeLabel(account)} <span className="text-xs text-stone-400">({account.pool_account_id})</span></span>
+                  <span className="ml-auto text-xs text-stone-400">{account.status} · {account.quota}</span>
+                </label>
+              )) : <p className="text-xs text-stone-500">暂时没有可配置的号池账号。</p>}
+            </div>
           </div>
           <DialogFooter>
             <Button
@@ -362,7 +468,7 @@ export function UserKeysCard() {
           }
         }}
       >
-        <DialogContent className="rounded-2xl p-6">
+        <DialogContent className="max-h-[90vh] overflow-y-auto rounded-2xl p-6">
           <DialogHeader className="gap-2">
             <DialogTitle>编辑用户密钥</DialogTitle>
             <DialogDescription className="text-sm leading-6">
@@ -390,6 +496,41 @@ export function UserKeysCard() {
               <p className="text-xs leading-5 text-stone-500">
                 保存后旧密钥会立即失效，新密钥生效。系统仍只保存哈希，不会回显当前密钥。
               </p>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              {[
+                ["每日额度", editDailyQuota, setEditDailyQuota],
+                ["每周额度", editWeeklyQuota, setEditWeeklyQuota],
+                ["总额度", editTotalQuota, setEditTotalQuota],
+              ].map(([label, value, setter]) => (
+                <div className="space-y-2" key={String(label)}>
+                  <label className="text-sm font-medium text-stone-700">{String(label)}</label>
+                  <Input
+                    inputMode="numeric"
+                    value={String(value)}
+                    onChange={(event) => (setter as (value: string) => void)(event.target.value)}
+                    placeholder="不限"
+                    className="h-11 rounded-xl border-stone-200 bg-white"
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">图片账号路由</label>
+              <div className="max-h-36 space-y-2 overflow-y-auto rounded-xl border border-stone-200 bg-stone-50 p-3">
+                {routeAccounts.length ? routeAccounts.map((account) => (
+                  <label key={account.pool_account_id} className="flex items-center gap-2 text-sm text-stone-700">
+                    <Checkbox
+                      checked={editRouteAccountIds.includes(account.pool_account_id)}
+                      onCheckedChange={(checked) => setEditRouteAccountIds((current) => checked
+                        ? [...current, account.pool_account_id]
+                        : current.filter((id) => id !== account.pool_account_id))}
+                    />
+                    <span className="min-w-0 truncate">{routeLabel(account)} <span className="text-xs text-stone-400">({account.pool_account_id})</span></span>
+                    <span className="ml-auto text-xs text-stone-400">{account.status} · {account.quota}</span>
+                  </label>
+                )) : <p className="text-xs text-stone-500">暂时没有可配置的号池账号。</p>}
+              </div>
             </div>
           </div>
           <DialogFooter>

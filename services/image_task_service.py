@@ -12,6 +12,7 @@ from services.config import DATA_DIR, config
 from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
+from services.quota_service import ImageQuotaReservation, quota_service
 
 TASK_STATUS_QUEUED = "queued"
 TASK_STATUS_RUNNING = "running"
@@ -224,7 +225,15 @@ class ImageTaskService:
                 "created_at": now,
                 "updated_at": now,
                 "created_ts": time.time(),
+                "quota_reserved": 0,
+                "quota_key_id": "",
             }
+            if str(identity.get("role") or "").strip().lower() != "admin":
+                # Reserve before queueing so a burst of queued tasks cannot
+                # bypass the user's image limit.
+                quota_service.reserve_images(identity, 1)
+                task["quota_reserved"] = 1
+                task["quota_key_id"] = owner
             self._tasks[key] = task
             self._save_locked()
             should_start = True
@@ -232,7 +241,13 @@ class ImageTaskService:
         if should_start:
             thread = threading.Thread(
                 target=self._run_task,
-                args=(key, mode, payload, dict(identity), _clean(payload.get("model"), "gpt-image-2")),
+                args=(
+                    key,
+                    mode,
+                    {**payload, "_identity": dict(identity), "_quota_already_reserved": True},
+                    dict(identity),
+                    _clean(payload.get("model"), "gpt-image-2"),
+                ),
                 name=f"image-task-{task_id[:16]}",
                 daemon=True,
             )
@@ -273,6 +288,7 @@ class ImageTaskService:
                 if account_email:
                     setattr(error, "account_email", account_email)
                 raise error
+            self._settle_quota(key, identity, len(data))
             usage = result.get("usage")
             duration_ms = int((time.time() - started) * 1000)
             self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, usage=usage, error="", duration_ms=duration_ms)
@@ -285,12 +301,14 @@ class ImageTaskService:
                 request_preview=request_text(payload.get("prompt")),
                 urls=_collect_image_urls(data),
                 account_email=account_email,
+                image_count=len(data),
             )
         except Exception as exc:
             error_message = str(exc) or "image task failed"
             account_email = _clean(getattr(exc, "account_email", ""))
             conversation_id = _clean(getattr(exc, "conversation_id", ""))
             duration_ms = int((time.time() - started) * 1000)
+            self._settle_quota(key, identity, 0)
             self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[],
                               duration_ms=duration_ms,
                               **({"conversation_id": conversation_id} if conversation_id else {}))
@@ -306,6 +324,17 @@ class ImageTaskService:
                 account_email=account_email,
             )
 
+    def _settle_quota(self, key: str, identity: dict[str, object], actual: int) -> None:
+        with self._lock:
+            task = self._tasks.get(key)
+            if not task or not int(task.get("quota_reserved") or 0):
+                return
+            reserved = int(task.get("quota_reserved") or 0)
+            task["quota_reserved"] = 0
+            key_id = str(task.get("quota_key_id") or _owner_id(identity))
+            self._save_locked()
+        quota_service.settle_images(ImageQuotaReservation(key_id, reserved), actual)
+
     def _log_call(
         self,
         identity: dict[str, object],
@@ -319,6 +348,7 @@ class ImageTaskService:
         error: str = "",
         urls: list[str] | None = None,
         account_email: str = "",
+        image_count: int = 0,
     ) -> None:
         endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
         summary_prefix = "图生图" if mode == "edit" else "文生图"
@@ -341,6 +371,8 @@ class ImageTaskService:
             detail["account_email"] = account_email
         if urls:
             detail["urls"] = list(dict.fromkeys(urls))
+        if image_count:
+            detail["image_count"] = max(0, int(image_count))
         try:
             log_service.add(LOG_TYPE_CALL, f"{summary_prefix}{suffix}", detail)
         except Exception:
@@ -391,6 +423,8 @@ class ImageTaskService:
                 "updated_ts": item.get("updated_ts"),
                 "started_ts": item.get("started_ts"),
                 "duration_ms": item.get("duration_ms"),
+                "quota_reserved": int(item.get("quota_reserved") or 0),
+                "quota_key_id": _clean(item.get("quota_key_id")),
             }
             data = item.get("data")
             if isinstance(data, list):
@@ -414,6 +448,11 @@ class ImageTaskService:
         changed = False
         for task in self._tasks.values():
             if task.get("status") in UNFINISHED_STATUSES:
+                reserved = int(task.get("quota_reserved") or 0)
+                key_id = _clean(task.get("quota_key_id"))
+                if reserved and key_id:
+                    quota_service.settle_images(ImageQuotaReservation(key_id, reserved), 0)
+                    task["quota_reserved"] = 0
                 task["status"] = TASK_STATUS_ERROR
                 task["error"] = "服务已重启，未完成的图片任务已中断"
                 task["updated_at"] = _now_iso()

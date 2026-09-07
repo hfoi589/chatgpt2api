@@ -15,6 +15,7 @@ from services.account_service import account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
+from services.quota_service import ImageQuotaReservation, quota_service
 from utils.helper import (
     IMAGE_MODELS,
     extract_image_from_message_content,
@@ -307,6 +308,8 @@ class ConversationRequest:
     base_url: str | None = None
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
+    identity: dict[str, object] | None = None
+    route_account_ids: list[str] | None = None
 
 
 @dataclass
@@ -1322,6 +1325,7 @@ def _generate_single_image(
                 plan_type=plan_type,
                 source_type="codex" if codex_model else None,
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
+                route_account_ids=request.route_account_ids,
             )
         except RuntimeError as exc:
             raise ImageGenerationError(str(exc) or "image generation failed", account_email=account_email) from exc
@@ -1608,7 +1612,11 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
 
     if not emitted:
         if not last_error:
-            last_error = "no account in the pool could generate images — check account quota and rate-limit status"
+            last_error = (
+                "no available image account in assigned route"
+                if request.route_account_ids
+                else "no account in the pool could generate images — check account quota and rate-limit status"
+            )
         raise ImageGenerationError(image_stream_error_message(last_error), conversation_id="")
 
 
@@ -1642,3 +1650,37 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     if account_email:
         result["_account_email"] = account_email
     return result
+
+
+def image_request_identity(body: dict[str, Any]) -> dict[str, object] | None:
+    identity = body.get("_identity")
+    if not isinstance(identity, dict):
+        return None
+    current = dict(identity)
+    route_getter = getattr(quota_service, "route_account_ids", None)
+    current["route_account_ids"] = route_getter(current) if callable(route_getter) else list(current.get("route_account_ids") or [])
+    return current
+
+
+def reserve_image_request(body: dict[str, Any], amount: int) -> ImageQuotaReservation | None:
+    """Reserve user quota unless an image task reserved it while being queued."""
+    if bool(body.get("_quota_already_reserved")):
+        return None
+    identity = image_request_identity(body)
+    if identity is None:
+        return None
+    return quota_service.reserve_images(identity, amount)
+
+
+def settle_image_outputs(
+    outputs: Iterable[ImageOutput],
+    reservation: ImageQuotaReservation | None,
+) -> Iterator[ImageOutput]:
+    actual = 0
+    try:
+        for output in outputs:
+            if output.kind == "result":
+                actual += len(output.data)
+            yield output
+    finally:
+        quota_service.settle_images(reservation, actual)

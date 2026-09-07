@@ -5,12 +5,26 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from services.image_task_service import ImageTaskService
 
 
 OWNER = {"id": "owner-1", "name": "Owner", "role": "admin"}
 OTHER_OWNER = {"id": "owner-2", "name": "Other", "role": "user"}
+
+
+class FakeQuota:
+    def __init__(self):
+        self.reserved = []
+        self.settled = []
+
+    def reserve_images(self, identity, amount):
+        self.reserved.append((identity["id"], amount))
+        return None
+
+    def settle_images(self, reservation, actual):
+        self.settled.append((reservation.key_id, reservation.amount, actual))
 
 
 def wait_for_task(service: ImageTaskService, identity: dict[str, object], task_id: str, status: str, timeout: float = 2.0):
@@ -143,6 +157,48 @@ class ImageTaskServiceTests(unittest.TestCase):
 
             self.assertEqual([item["status"] for item in result["items"]], ["error", "error"])
             self.assertTrue(all("已中断" in item.get("error", "") for item in result["items"]))
+
+    def test_user_task_reserves_and_settles_actual_image_count(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            quota = FakeQuota()
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json")
+            with patch("services.image_task_service.quota_service", quota):
+                service.submit_generation(
+                    OTHER_OWNER,
+                    client_task_id="quota-task",
+                    prompt="cat",
+                    model="gpt-image-2",
+                    size=None,
+                    base_url="http://local.test",
+                )
+                task = wait_for_task(service, OTHER_OWNER, "quota-task", "success")
+            self.assertEqual(quota.reserved, [("owner-2", 1)])
+            self.assertEqual(quota.settled, [("owner-2", 1, 1)])
+            self.assertEqual(len(task["data"]), 1)
+
+    def test_user_task_passes_fixed_route_context_to_handler(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            quota = FakeQuota()
+            seen = []
+
+            def handler(payload):
+                seen.append(payload)
+                return {"data": [{"url": "http://example.test/image.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            identity = {"id": "owner-2", "name": "Other", "role": "user", "route_account_ids": ["pool-1"]}
+            with patch("services.image_task_service.quota_service", quota):
+                service.submit_generation(
+                    identity,
+                    client_task_id="route-task",
+                    prompt="cat",
+                    model="gpt-image-2",
+                    size=None,
+                    base_url="http://local.test",
+                )
+                wait_for_task(service, identity, "route-task", "success")
+            self.assertEqual(seen[0]["_identity"]["route_account_ids"], ["pool-1"])
+            self.assertTrue(seen[0]["_quota_already_reserved"])
 
 
 if __name__ == "__main__":

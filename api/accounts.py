@@ -15,9 +15,11 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from services.auth_service import auth_service
+from services.quota_service import quota_service
 
 from api.support import (
     require_admin,
+    require_identity,
     sanitize_cpa_pool,
     sanitize_cpa_pools,
     sanitize_sub2api_server,
@@ -37,12 +39,20 @@ from services.sub2api_service import (
 
 class UserKeyCreateRequest(BaseModel):
     name: str = ""
+    daily_quota: int | None = None
+    weekly_quota: int | None = None
+    total_quota: int | None = None
+    route_account_ids: list[str] = Field(default_factory=list)
 
 
 class UserKeyUpdateRequest(BaseModel):
     name: str | None = None
     enabled: bool | None = None
     key: str | None = None
+    daily_quota: int | None = None
+    weekly_quota: int | None = None
+    total_quota: int | None = None
+    route_account_ids: list[str] | None = None
 
 
 class AccountCreateRequest(BaseModel):
@@ -160,19 +170,63 @@ def _account_zip_bytes(items: list[dict[str, str]]) -> bytes:
 def create_router() -> APIRouter:
     router = APIRouter()
 
+    def _user_key_items() -> list[dict[str, object]]:
+        items = auth_service.list_keys(role="user")
+        refreshed: list[dict[str, object]] = []
+        for item in items:
+            usage = quota_service.public_usage(item)
+            refreshed.append({
+                **item,
+                "daily_used": usage.get("daily", {}).get("used", item.get("daily_used", 0)),
+                "weekly_used": usage.get("weekly", {}).get("used", item.get("weekly_used", 0)),
+                "total_used": usage.get("total", {}).get("used", item.get("total_used", 0)),
+                "lifetime_used": usage.get("lifetime_used", item.get("lifetime_used", 0)),
+            })
+        return refreshed
+
     @router.get("/api/auth/users")
     async def list_user_keys(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"items": auth_service.list_keys(role="user")}
+        return {"items": _user_key_items()}
+
+    @router.get("/api/auth/me/usage")
+    async def get_my_usage(authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        return quota_service.public_usage(identity)
+
+    @router.get("/api/accounts/routes")
+    async def list_account_routes(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"items": account_service.list_image_route_accounts()}
+
+    def _validate_route_ids(route_ids: list[str]) -> list[str]:
+        normalized = list(dict.fromkeys(str(item or "").strip() for item in route_ids if str(item or "").strip()))
+        valid = {
+            value
+            for item in account_service.list_image_route_accounts()
+            for value in (str(item.get("pool_account_id") or "").strip(), str(item.get("account_id") or "").strip())
+            if value
+        }
+        unknown = [item for item in normalized if item not in valid]
+        if unknown:
+            raise ValueError(f"账号路由不存在或已被删除: {', '.join(unknown)}")
+        return normalized
 
     @router.post("/api/auth/users")
     async def create_user_key(body: UserKeyCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
-            item, raw_key = auth_service.create_key(role="user", name=body.name)
+            item, raw_key = auth_service.create_key(
+                role="user",
+                name=body.name,
+                daily_quota=body.daily_quota,
+                weekly_quota=body.weekly_quota,
+                total_quota=body.total_quota,
+                route_account_ids=_validate_route_ids(body.route_account_ids),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-        return {"item": item, "key": raw_key, "items": auth_service.list_keys(role="user")}
+        return {"item": item, "key": raw_key, "items": _user_key_items()}
 
     @router.post("/api/auth/users/{key_id}")
     async def update_user_key(
@@ -190,22 +244,27 @@ def create_router() -> APIRouter:
             }.items()
             if value is not None
         }
+        for field in ("daily_quota", "weekly_quota", "total_quota", "route_account_ids"):
+            if field in body.model_fields_set:
+                updates[field] = getattr(body, field)
         if not updates:
             raise HTTPException(status_code=400, detail={"error": "还没有检测到改动，请修改后再保存"})
         try:
+            if "route_account_ids" in updates:
+                updates["route_account_ids"] = _validate_route_ids(updates["route_account_ids"] or [])
             item = auth_service.update_key(key_id, updates, role="user")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         if item is None:
             raise HTTPException(status_code=404, detail={"error": "这条用户密钥不存在，可能已经被删除"})
-        return {"item": item, "items": auth_service.list_keys(role="user")}
+        return {"item": item, "items": _user_key_items()}
 
     @router.delete("/api/auth/users/{key_id}")
     async def delete_user_key(key_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         if not auth_service.delete_key(key_id, role="user"):
             raise HTTPException(status_code=404, detail={"error": "这条用户密钥不存在，可能已经被删除"})
-        return {"items": auth_service.list_keys(role="user")}
+        return {"items": _user_key_items()}
 
     @router.get("/api/accounts")
     async def get_accounts(authorization: str | None = Header(default=None)):

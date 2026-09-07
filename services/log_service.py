@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import itertools
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -157,6 +156,27 @@ def _collect_conversation_ids(value: object) -> list[str]:
     return ids
 
 
+def _collect_image_count(value: object) -> int:
+    """Best-effort count of generated image result items in a response/event."""
+    if isinstance(value, dict):
+        item_type = str(value.get("type") or "").strip()
+        if item_type == "image_generation_call" and value.get("result"):
+            return 1
+        data = value.get("data")
+        if isinstance(data, list):
+            image_items = [
+                item
+                for item in data
+                if isinstance(item, dict) and (item.get("b64_json") or item.get("url"))
+            ]
+            if image_items:
+                return len(image_items)
+        return sum(_collect_image_count(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(_collect_image_count(item) for item in value)
+    return 0
+
+
 def _strip_internal_response_fields(value: object) -> object:
     if isinstance(value, dict):
         return {
@@ -183,11 +203,12 @@ def _image_error_response(exc: Exception) -> JSONResponse:
     from services.protocol.conversation import public_image_error_message
 
     message = public_image_error_message(str(exc))
-    if "no available image quota" in message.lower():
+    lower_message = message.lower()
+    if "quota" in lower_message or "额度" in message or "assigned route" in lower_message:
         return openai_error_response(
             {
                 "error": {
-                    "message": "no available image quota",
+                    "message": message,
                     "type": "insufficient_quota",
                     "param": None,
                     "code": "insufficient_quota",
@@ -214,6 +235,22 @@ def _next_item(items):
         return False, None
 
 
+def _prepend_item(first: object, items):
+    try:
+        yield first
+        yield from items
+    finally:
+        close = getattr(items, "close", None)
+        if callable(close):
+            close()
+
+
+def _close_iterator(value: object) -> None:
+    close = getattr(value, "close", None)
+    if callable(close):
+        close()
+
+
 @dataclass
 class LoggedCall:
     identity: dict[str, object]
@@ -226,17 +263,28 @@ class LoggedCall:
 
     async def run(self, handler, *args, sse: str = "openai"):
         from services.protocol.conversation import ImageGenerationError
+        from services.quota_service import QuotaExceededError
 
+        result = None
         try:
             result = await run_in_threadpool(handler, *args)
         except ImageGenerationError as exc:
+            _close_iterator(result)
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""))
             return _image_error_response(exc)
+        except QuotaExceededError as exc:
+            _close_iterator(result)
+            self.log("调用失败", status="failed", error=str(exc))
+            if self.endpoint.startswith("/v1/images") or self.endpoint == "/v1/responses":
+                return _image_error_response(exc)
+            return _protocol_error_response(exc, 429, sse)
         except HTTPException as exc:
+            _close_iterator(result)
             self.log("调用失败", status="failed", error=str(exc.detail))
             raise
         except Exception as exc:
+            _close_iterator(result)
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
@@ -252,13 +300,22 @@ class LoggedCall:
         try:
             has_first, first = await run_in_threadpool(_next_item, result)
         except ImageGenerationError as exc:
+            _close_iterator(result)
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""))
             return _image_error_response(exc)
+        except QuotaExceededError as exc:
+            _close_iterator(result)
+            self.log("调用失败", status="failed", error=str(exc))
+            if self.endpoint.startswith("/v1/images") or self.endpoint == "/v1/responses":
+                return _image_error_response(exc)
+            return _protocol_error_response(exc, 429, sse)
         except HTTPException as exc:
+            _close_iterator(result)
             self.log("调用失败", status="failed", error=str(exc.detail))
             raise
         except Exception as exc:
+            _close_iterator(result)
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
@@ -266,18 +323,20 @@ class LoggedCall:
         if not has_first:
             self.log("流式调用结束")
             return StreamingResponse(sender(()), media_type="text/event-stream")
-        return StreamingResponse(sender(self.stream(itertools.chain([first], result))), media_type="text/event-stream")
+        return StreamingResponse(sender(self.stream(_prepend_item(first, result))), media_type="text/event-stream")
 
     def stream(self, items):
         urls: list[str] = []
         account_emails: list[str] = []
         conversation_ids: list[str] = []
+        image_count = 0
         failed = False
         try:
             for item in items:
                 urls.extend(_collect_urls(item))
                 account_emails.extend(_collect_account_emails(item))
                 conversation_ids.extend(_collect_conversation_ids(item))
+                image_count += _collect_image_count(item)
                 yield _strip_internal_response_fields(item)
         except Exception as exc:
             failed = True
@@ -288,6 +347,7 @@ class LoggedCall:
                 urls=urls,
                 account_email=(account_emails[0] if account_emails else getattr(exc, "account_email", "")),
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),
+                image_count=image_count,
             )
             if self.endpoint.startswith("/v1/images") and not hasattr(exc, "to_openai_error"):
                 from services.protocol.conversation import ImageGenerationError, public_image_error_message
@@ -297,10 +357,11 @@ class LoggedCall:
         finally:
             if not failed:
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
-                         conversation_id=conversation_ids[0] if conversation_ids else "")
+                         conversation_id=conversation_ids[0] if conversation_ids else "", image_count=image_count)
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
-            urls: list[str] | None = None, account_email: str = "", conversation_id: str = "") -> None:
+            urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
+            image_count: int = 0) -> None:
         detail = {
             "key_id": self.identity.get("id"),
             "key_name": self.identity.get("name"),
@@ -319,6 +380,9 @@ class LoggedCall:
             detail["request_shape"] = self.request_shape
         if error:
             detail["error"] = error
+        count = max(0, int(image_count or 0)) or _collect_image_count(result)
+        if count:
+            detail["image_count"] = count
         email = str(account_email or "").strip()
         if not email:
             emails = _collect_account_emails(result)

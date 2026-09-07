@@ -96,6 +96,45 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(plus_token, "token-plus")
             self.assertEqual(pro_token, "token-pro")
 
+    def test_get_available_access_token_filters_by_user_route_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items(
+                [
+                    {"access_token": "token-one", "email": "one@example.test", "status": "正常", "quota": 3},
+                    {"access_token": "token-two", "email": "two@example.test", "status": "正常", "quota": 3},
+                ]
+            )
+            accounts = service.list_accounts()
+            target = next(item for item in accounts if item["email"] == "one@example.test")["pool_account_id"]
+            service.fetch_remote_info = lambda access_token, event="fetch_remote_info": service.get_account(access_token)
+
+            token = service.get_available_access_token(route_account_ids=[target])
+            service.release_image_slot(token)
+
+            self.assertEqual(token, "token-one")
+
+    def test_pool_account_id_survives_access_token_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([{"access_token": "old-token", "status": "正常", "quota": 2}])
+            before = service.get_account("old-token")
+            rotated = service._apply_refreshed_tokens("old-token", {"access_token": "new-token"}, "test")
+            after = service.get_account(rotated)
+            self.assertEqual(rotated, "new-token")
+            self.assertEqual(after["pool_account_id"], before["pool_account_id"])
+
+    def test_route_exhaustion_does_not_fall_back_to_global_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "available", "status": "正常", "quota": 2},
+                {"access_token": "limited", "status": "限流", "quota": 2},
+            ])
+            selected = next(item for item in service.list_accounts() if item["access_token"] == "limited")["pool_account_id"]
+            with self.assertRaisesRegex(RuntimeError, "assigned route"):
+                service.get_available_access_token(route_account_ids=[selected])
+
     def test_refresh_accounts_can_remove_invalid_token_without_confirmation_delay(self) -> None:
         original_value = config.data.get("auto_remove_invalid_accounts")
         config.data["auto_remove_invalid_accounts"] = True
@@ -211,6 +250,25 @@ class AuthServiceTests(unittest.TestCase):
             authed = service.authenticate("sk-user-custom-key")
             self.assertIsNotNone(authed)
             self.assertEqual(authed["id"], item["id"])
+
+    def test_user_key_persists_quotas_and_image_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir)
+            service = AuthService(JSONStorageBackend(path / "accounts.json", path / "auth_keys.json"))
+            item, _ = service.create_key(
+                role="user",
+                name="Alice",
+                daily_quota=10,
+                weekly_quota=20,
+                total_quota=100,
+                route_account_ids=["pool-a", "pool-a", "pool-b"],
+            )
+            self.assertEqual(item["daily_quota"], 10)
+            self.assertEqual(item["route_account_ids"], ["pool-a", "pool-b"])
+            updated = service.update_key(item["id"], {"daily_quota": None, "route_account_ids": []}, role="user")
+            self.assertIsNotNone(updated)
+            self.assertIsNone(updated["daily_quota"])
+            self.assertEqual(updated["route_account_ids"], [])
 
     def test_user_key_name_must_be_unique(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
