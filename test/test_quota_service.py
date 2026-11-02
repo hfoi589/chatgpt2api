@@ -49,7 +49,6 @@ class QuotaServiceTests(unittest.TestCase):
             "lifetime_used": 0,
             "daily_window_start": None,
             "weekly_window_start": None,
-            "route_account_ids": [],
             **overrides,
         }
         auth = FakeAuthService(item)
@@ -85,10 +84,10 @@ class QuotaServiceTests(unittest.TestCase):
         self.assertEqual(auth.item["daily_used"], 1)
         self.assertEqual(auth.item["weekly_used"], 1)
 
-    def test_public_usage_reports_remaining_and_route(self):
+    def test_public_usage_reports_remaining_and_history(self):
         service, _ = self.make(daily_quota=10, daily_used=4, total_quota=20, total_used=7, lifetime_used=7,
                                daily_window_start="2026-09-07", weekly_window_start="2026-09-07",
-                               route_account_ids=["pool-1"])
+                               )
         usage = service.public_usage({"id": "key-1", "role": "user"})
         self.assertEqual(usage["lifetime_used"], 7)
         self.assertEqual(usage["daily"]["remaining"], 6)

@@ -204,7 +204,7 @@ def _image_error_response(exc: Exception) -> JSONResponse:
 
     message = public_image_error_message(str(exc))
     lower_message = message.lower()
-    if "quota" in lower_message or "额度" in message or "assigned route" in lower_message:
+    if "quota" in lower_message or "额度" in message:
         return openai_error_response(
             {
                 "error": {

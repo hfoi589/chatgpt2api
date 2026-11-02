@@ -182,7 +182,6 @@ class QuotaService:
                 "total": {"used": 0, "limit": None, "remaining": None},
                 "blocked": False,
                 "reason": None,
-                "route_account_ids": [],
             }
         key_id = str(identity.get("id") or "").strip()
         day, week, daily_reset, weekly_reset = self._periods()
@@ -200,7 +199,6 @@ class QuotaService:
                 "total": {"used": 0, "limit": 0, "remaining": 0},
                 "blocked": True,
                 "reason": "用户密钥不存在",
-                "route_account_ids": [],
             }
         daily_limit = self._as_limit(item.get("daily_quota"))
         weekly_limit = self._as_limit(item.get("weekly_quota"))
@@ -238,16 +236,7 @@ class QuotaService:
             "total": {"used": total_used, "limit": total_baseline, "remaining": total_remaining},
             "blocked": reason is not None,
             "reason": reason,
-            "route_account_ids": list(item.get("route_account_ids") or []),
         }
-
-    def route_account_ids(self, identity: dict[str, object]) -> list[str]:
-        if str(identity.get("role") or "").strip().lower() == "admin":
-            return []
-        key_id = str(identity.get("id") or "").strip()
-        item = self.auth_service.get_key_for_usage(key_id) if key_id else None
-        routes = item.get("route_account_ids") if isinstance(item, dict) else identity.get("route_account_ids")
-        return list(dict.fromkeys(str(item).strip() for item in routes if str(item).strip())) if isinstance(routes, list) else []
 
 
 from services.auth_service import auth_service

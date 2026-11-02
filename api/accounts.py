@@ -42,7 +42,6 @@ class UserKeyCreateRequest(BaseModel):
     daily_quota: int | None = None
     weekly_quota: int | None = None
     total_quota: int | None = None
-    route_account_ids: list[str] = Field(default_factory=list)
 
 
 class UserKeyUpdateRequest(BaseModel):
@@ -52,7 +51,6 @@ class UserKeyUpdateRequest(BaseModel):
     daily_quota: int | None = None
     weekly_quota: int | None = None
     total_quota: int | None = None
-    route_account_ids: list[str] | None = None
 
 
 class AccountCreateRequest(BaseModel):
@@ -194,24 +192,6 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         return quota_service.public_usage(identity)
 
-    @router.get("/api/accounts/routes")
-    async def list_account_routes(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        return {"items": account_service.list_image_route_accounts()}
-
-    def _validate_route_ids(route_ids: list[str]) -> list[str]:
-        normalized = list(dict.fromkeys(str(item or "").strip() for item in route_ids if str(item or "").strip()))
-        valid = {
-            value
-            for item in account_service.list_image_route_accounts()
-            for value in (str(item.get("pool_account_id") or "").strip(), str(item.get("account_id") or "").strip())
-            if value
-        }
-        unknown = [item for item in normalized if item not in valid]
-        if unknown:
-            raise ValueError(f"账号路由不存在或已被删除: {', '.join(unknown)}")
-        return normalized
-
     @router.post("/api/auth/users")
     async def create_user_key(body: UserKeyCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -222,7 +202,6 @@ def create_router() -> APIRouter:
                 daily_quota=body.daily_quota,
                 weekly_quota=body.weekly_quota,
                 total_quota=body.total_quota,
-                route_account_ids=_validate_route_ids(body.route_account_ids),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
@@ -244,14 +223,12 @@ def create_router() -> APIRouter:
             }.items()
             if value is not None
         }
-        for field in ("daily_quota", "weekly_quota", "total_quota", "route_account_ids"):
+        for field in ("daily_quota", "weekly_quota", "total_quota"):
             if field in body.model_fields_set:
                 updates[field] = getattr(body, field)
         if not updates:
             raise HTTPException(status_code=400, detail={"error": "还没有检测到改动，请修改后再保存"})
         try:
-            if "route_account_ids" in updates:
-                updates["route_account_ids"] = _validate_route_ids(updates["route_account_ids"] or [])
             item = auth_service.update_key(key_id, updates, role="user")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc

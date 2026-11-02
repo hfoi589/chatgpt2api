@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import secrets
 import time
@@ -221,22 +220,6 @@ class AccountService:
         normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
         normalized["email"] = normalized.get("email") or None
         normalized["user_id"] = normalized.get("user_id") or None
-        if not str(normalized.get("account_id") or "").strip():
-            auth_claim = self._decode_jwt_payload(str(access_token)).get("https://api.openai.com/auth")
-            if isinstance(auth_claim, dict) and str(auth_claim.get("chatgpt_account_id") or "").strip():
-                normalized["account_id"] = str(auth_claim.get("chatgpt_account_id") or "").strip()
-        # `pool_account_id` is an app-owned stable identifier used by user-key
-        # routing. Keep the upstream `account_id` field intact for exports and
-        # diagnostics, but never make routing depend on a rotating token.
-        normalized["pool_account_id"] = str(
-            normalized.get("pool_account_id")
-            or normalized.get("stable_account_id")
-            or normalized.get("account_id")
-            or f"pool-{hashlib.sha256(str(access_token).encode('utf-8')).hexdigest()[:20]}"
-        ).strip()
-        normalized["stable_account_id"] = normalized["pool_account_id"]
-        if not str(normalized.get("account_id") or "").strip():
-            normalized["account_id"] = normalized["pool_account_id"]
         normalized["proxy"] = str(normalized.get("proxy") or "").strip()
         source_type = normalized.get("source_type")
         if not source_type and str(normalized.get("export_type") or "").strip().lower() == "codex":
@@ -909,10 +892,8 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
-            route_account_ids: set[str] | tuple[str, ...] | list[str] | None = None,
     ) -> list[str]:
         excluded = set(excluded_tokens or set())
-        route_ids = {str(item).strip() for item in (route_account_ids or []) if str(item).strip()}
         return [
             token
             for item in self._accounts.values()
@@ -920,7 +901,6 @@ class AccountService:
                and self._account_matches_plan_type(item, plan_type)
                and self._account_matches_any_plan_type(item, plan_types)
                and self._account_matches_source_type(item, source_type)
-               and (not route_ids or str(item.get("pool_account_id") or "").strip() in route_ids or str(item.get("account_id") or "").strip() in route_ids)
                and (token := item.get("access_token") or "")
                and token not in excluded
         ]
@@ -931,12 +911,11 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
-            route_account_ids: set[str] | tuple[str, ...] | list[str] | None = None,
     ) -> list[str]:
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
         return [
             token
-            for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types, route_account_ids)
+            for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
@@ -946,19 +925,15 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
-            route_account_ids: set[str] | tuple[str, ...] | list[str] | None = None,
     ) -> str:
         with self._image_slot_condition:
             while True:
-                if not self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types, route_account_ids):
+                if not self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types):
                     raise RuntimeError(
-                        "no available image account in assigned route"
-                        if route_account_ids
-                        else
                         f"no available {plan_type or source_type or ''} image quota".replace("  ", " ").strip()
                         if plan_type or source_type else "no available image quota"
                     )
-                tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types, route_account_ids)
+                tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
                 if tokens:
                     access_token = tokens[self._index % len(tokens)]
                     self._index += 1
@@ -983,7 +958,6 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
-            route_account_ids: set[str] | tuple[str, ...] | list[str] | None = None,
     ) -> str:
         """从候选池中获取一个可用的图片生图 token。
 
@@ -998,7 +972,6 @@ class AccountService:
                 plan_type=plan_type,
                 source_type=source_type,
                 plan_types=plan_types,
-                route_account_ids=route_account_ids,
             )
             attempted_tokens.add(access_token)
             try:
@@ -1016,14 +989,10 @@ class AccountService:
                     and self._account_matches_plan_type(account or {}, plan_type)
                     and self._account_matches_any_plan_type(account or {}, plan_types)
                     and self._account_matches_source_type(account or {}, source_type)
-                    and (not route_account_ids or str((account or {}).get("pool_account_id") or "").strip() in {str(item).strip() for item in route_account_ids} or str((account or {}).get("account_id") or "").strip() in {str(item).strip() for item in route_account_ids})
             ):
                 return str((account or {}).get("access_token") or access_token)
             self.release_image_slot(access_token)
         raise RuntimeError(
-            "no available image account in assigned route"
-            if route_account_ids
-            else
             f"no available {plan_type or source_type or ''} image quota (tried {len(attempted_tokens)} tokens)".replace("  ", " ").strip()
             if plan_type or source_type else f"no available image quota (tried {len(attempted_tokens)} tokens)"
         )
@@ -1114,25 +1083,6 @@ class AccountService:
                 account["image_inflight"] = int(self._image_inflight.get(token, 0))
                 result.append(account)
             return result
-
-    def list_image_route_accounts(self) -> list[dict]:
-        """Return non-secret account metadata for user-key image routing."""
-        with self._lock:
-            return [
-                {
-                    "pool_account_id": str(item.get("pool_account_id") or ""),
-                    "stable_account_id": str(item.get("pool_account_id") or ""),
-                    "id": str(item.get("pool_account_id") or ""),
-                    "account_id": item.get("account_id"),
-                    "email": item.get("email"),
-                    "type": item.get("type"),
-                    "source_type": item.get("source_type"),
-                    "status": item.get("status"),
-                    "quota": max(0, int(item.get("quota") or 0)),
-                }
-                for item in self._accounts.values()
-                if str(item.get("pool_account_id") or "").strip()
-            ]
 
     def list_limited_tokens(self) -> list[str]:
         with self._lock:
@@ -1716,7 +1666,6 @@ class AccountService:
                 "type": str(account.get("export_type") or "codex"),
                 "email": email,
                 "account_id": account_id,
-                "pool_account_id": str(account.get("pool_account_id") or "").strip(),
                 "access_token": access_token,
                 "refresh_token": refresh_token,
                 "id_token": id_token,

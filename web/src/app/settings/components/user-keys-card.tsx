@@ -16,14 +16,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   createUserKey,
   deleteUserKey,
-  fetchImageRouteAccounts,
   fetchUserKeys,
   updateUserKey,
-  type ImageRouteAccount,
   type UserKey,
 } from "@/lib/api";
 
@@ -39,10 +36,6 @@ function parseQuota(value: string) {
 
 function quotaText(value: number | null | undefined) {
   return value == null ? "" : String(value);
-}
-
-function routeLabel(account: ImageRouteAccount) {
-  return account.email || account.account_id || account.pool_account_id;
 }
 
 function formatDateTime(value?: string | null) {
@@ -65,14 +58,12 @@ function formatDateTime(value?: string | null) {
 export function UserKeysCard() {
   const didLoadRef = useRef(false);
   const [items, setItems] = useState<UserKey[]>([]);
-  const [routeAccounts, setRouteAccounts] = useState<ImageRouteAccount[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [name, setName] = useState("");
   const [dailyQuota, setDailyQuota] = useState("");
   const [weeklyQuota, setWeeklyQuota] = useState("");
   const [totalQuota, setTotalQuota] = useState("");
-  const [routeAccountIds, setRouteAccountIds] = useState<string[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
   const [revealedKey, setRevealedKey] = useState("");
@@ -83,19 +74,12 @@ export function UserKeysCard() {
   const [editDailyQuota, setEditDailyQuota] = useState("");
   const [editWeeklyQuota, setEditWeeklyQuota] = useState("");
   const [editTotalQuota, setEditTotalQuota] = useState("");
-  const [editRouteAccountIds, setEditRouteAccountIds] = useState<string[]>([]);
 
   const load = async () => {
     setIsLoading(true);
     try {
       const data = await fetchUserKeys();
       setItems(data.items);
-      try {
-        const routes = await fetchImageRouteAccounts();
-        setRouteAccounts(routes.items);
-      } catch {
-        setRouteAccounts([]);
-      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载用户密钥失败");
     } finally {
@@ -119,7 +103,6 @@ export function UserKeysCard() {
         daily_quota: parseQuota(dailyQuota),
         weekly_quota: parseQuota(weeklyQuota),
         total_quota: parseQuota(totalQuota),
-        route_account_ids: routeAccountIds,
       });
       setItems(data.items);
       setRevealedKey(data.key);
@@ -127,7 +110,6 @@ export function UserKeysCard() {
       setDailyQuota("");
       setWeeklyQuota("");
       setTotalQuota("");
-      setRouteAccountIds([]);
       setIsDialogOpen(false);
       toast.success("用户密钥已创建");
     } catch (error) {
@@ -187,7 +169,6 @@ export function UserKeysCard() {
     setEditDailyQuota(quotaText(item.daily_quota));
     setEditWeeklyQuota(quotaText(item.weekly_quota));
     setEditTotalQuota(quotaText(item.total_quota));
-    setEditRouteAccountIds(item.route_account_ids || []);
   };
 
   const handleEdit = async () => {
@@ -200,8 +181,7 @@ export function UserKeysCard() {
     if (trimmedName === item.name && !trimmedKey &&
       editDailyQuota === quotaText(item.daily_quota) &&
       editWeeklyQuota === quotaText(item.weekly_quota) &&
-      editTotalQuota === quotaText(item.total_quota) &&
-      JSON.stringify(editRouteAccountIds) === JSON.stringify(item.route_account_ids || [])) {
+      editTotalQuota === quotaText(item.total_quota)) {
       setEditingItem(null);
       return;
     }
@@ -213,7 +193,6 @@ export function UserKeysCard() {
         daily_quota: parseQuota(editDailyQuota),
         weekly_quota: parseQuota(editWeeklyQuota),
         total_quota: parseQuota(editTotalQuota),
-        route_account_ids: editRouteAccountIds,
       });
       setItems(data.items);
       setEditingItem(null);
@@ -302,9 +281,6 @@ export function UserKeysCard() {
                         <span>每周 {item.weekly_quota == null ? "不限" : `${item.weekly_used}/${item.weekly_quota}`}</span>
                         <span>总额度 {item.total_quota == null ? "不限" : `剩余 ${item.total_quota}（已用 ${item.total_used}）`}</span>
                       </div>
-                      <div className="text-xs text-stone-500">
-                        图片路由：{item.route_account_ids?.length ? `${item.route_account_ids.length} 个指定账号` : "全局号池"}
-                      </div>
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -358,7 +334,7 @@ export function UserKeysCard() {
           <DialogHeader className="gap-2">
             <DialogTitle>创建用户密钥</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              可选填写额度和账号路由；留空表示该项不限制。总额度是可用余额，成功生成图片后会直接扣减。
+              可选设置每日、每周和总图片额度；留空表示该项不限制。总额度是可用余额，成功生成图片后会直接扣减。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
@@ -387,23 +363,6 @@ export function UserKeysCard() {
                 />
               </div>
             ))}
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-stone-700">图片账号路由（可多选，留空使用全局号池）</label>
-            <div className="max-h-36 space-y-2 overflow-y-auto rounded-xl border border-stone-200 bg-stone-50 p-3">
-              {routeAccounts.length ? routeAccounts.map((account) => (
-                <label key={account.pool_account_id} className="flex items-center gap-2 text-sm text-stone-700">
-                  <Checkbox
-                    checked={routeAccountIds.includes(account.pool_account_id)}
-                    onCheckedChange={(checked) => setRouteAccountIds((current) => checked
-                      ? [...current, account.pool_account_id]
-                      : current.filter((id) => id !== account.pool_account_id))}
-                  />
-                  <span className="min-w-0 truncate">{routeLabel(account)} <span className="text-xs text-stone-400">({account.pool_account_id})</span></span>
-                  <span className="ml-auto text-xs text-stone-400">{account.status} · {account.quota}</span>
-                </label>
-              )) : <p className="text-xs text-stone-500">暂时没有可配置的号池账号。</p>}
-            </div>
           </div>
           <DialogFooter>
             <Button
@@ -514,23 +473,6 @@ export function UserKeysCard() {
                   />
                 </div>
               ))}
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">图片账号路由</label>
-              <div className="max-h-36 space-y-2 overflow-y-auto rounded-xl border border-stone-200 bg-stone-50 p-3">
-                {routeAccounts.length ? routeAccounts.map((account) => (
-                  <label key={account.pool_account_id} className="flex items-center gap-2 text-sm text-stone-700">
-                    <Checkbox
-                      checked={editRouteAccountIds.includes(account.pool_account_id)}
-                      onCheckedChange={(checked) => setEditRouteAccountIds((current) => checked
-                        ? [...current, account.pool_account_id]
-                        : current.filter((id) => id !== account.pool_account_id))}
-                    />
-                    <span className="min-w-0 truncate">{routeLabel(account)} <span className="text-xs text-stone-400">({account.pool_account_id})</span></span>
-                    <span className="ml-auto text-xs text-stone-400">{account.status} · {account.quota}</span>
-                  </label>
-                )) : <p className="text-xs text-stone-500">暂时没有可配置的号池账号。</p>}
-              </div>
             </div>
           </div>
           <DialogFooter>

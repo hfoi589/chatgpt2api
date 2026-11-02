@@ -26,6 +26,7 @@ class AuthService:
     def __init__(self, storage: StorageBackend):
         self.storage = storage
         self._lock = Lock()
+        self._legacy_route_cleanup_attempted = False
         self._items = self._load()
         self._last_used_flush_at: dict[str, datetime] = {}
 
@@ -69,10 +70,6 @@ class AuthService:
             result["usage_migration_version"] = max(0, int(raw.get("usage_migration_version") or 0))
         except (TypeError, ValueError):
             result["usage_migration_version"] = 0
-        routes = raw.get("route_account_ids")
-        if not isinstance(routes, list):
-            routes = []
-        result["route_account_ids"] = list(dict.fromkeys(str(item).strip() for item in routes if str(item).strip()))
         return result
 
     def _normalize_item(self, raw: object) -> dict[str, object] | None:
@@ -107,7 +104,17 @@ class AuthService:
             return []
         if not isinstance(items, list):
             return []
-        return [normalized for item in items if (normalized := self._normalize_item(item)) is not None]
+        normalized_items = [normalized for item in items if (normalized := self._normalize_item(item)) is not None]
+        has_legacy_routes = any(isinstance(item, dict) and "route_account_ids" in item for item in items)
+        if has_legacy_routes and not self._legacy_route_cleanup_attempted:
+            self._legacy_route_cleanup_attempted = True
+            try:
+                self.storage.save_auth_keys(normalized_items)
+            except Exception as exc:
+                # The obsolete field is ignored in memory regardless; a failed
+                # cleanup must not disable valid keys or quota accounting.
+                print(f"[auth] could not persist cleanup of obsolete image route settings: {exc}")
+        return normalized_items
 
     def _save(self) -> None:
         self.storage.save_auth_keys(self._items)
@@ -133,7 +140,6 @@ class AuthService:
             "lifetime_used": int(item.get("lifetime_used") or 0),
             "daily_window_start": item.get("daily_window_start"),
             "weekly_window_start": item.get("weekly_window_start"),
-            "route_account_ids": list(item.get("route_account_ids") or []),
         }
 
     def list_keys(self, role: AuthRole | None = None) -> list[dict[str, object]]:
@@ -205,7 +211,6 @@ class AuthService:
         daily_quota: object = None,
         weekly_quota: object = None,
         total_quota: object = None,
-        route_account_ids: list[str] | None = None,
     ) -> tuple[dict[str, object], str]:
         with self._lock:
             self._reload_locked()
@@ -235,7 +240,6 @@ class AuthService:
                 "daily_window_start": None,
                 "weekly_window_start": None,
                 "usage_migration_version": 0,
-                "route_account_ids": list(dict.fromkeys(str(item).strip() for item in (route_account_ids or []) if str(item).strip())),
             }
             self._items.append(item)
             self._save()
@@ -273,13 +277,6 @@ class AuthService:
                 for field in ("daily_quota", "weekly_quota", "total_quota"):
                     if field in updates:
                         next_item[field] = self._optional_quota(updates.get(field))
-                if "route_account_ids" in updates:
-                    routes = updates.get("route_account_ids")
-                    if routes is None:
-                        routes = []
-                    if not isinstance(routes, list):
-                        raise ValueError("账号路由必须是账号 ID 列表")
-                    next_item["route_account_ids"] = list(dict.fromkeys(str(item).strip() for item in routes if str(item).strip()))
                 self._items[index] = next_item
                 self._save()
                 return self._public_item(next_item)

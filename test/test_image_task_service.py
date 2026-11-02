@@ -176,30 +176,5 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(quota.settled, [("owner-2", 1, 1)])
             self.assertEqual(len(task["data"]), 1)
 
-    def test_user_task_passes_fixed_route_context_to_handler(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            quota = FakeQuota()
-            seen = []
-
-            def handler(payload):
-                seen.append(payload)
-                return {"data": [{"url": "http://example.test/image.png"}]}
-
-            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
-            identity = {"id": "owner-2", "name": "Other", "role": "user", "route_account_ids": ["pool-1"]}
-            with patch("services.image_task_service.quota_service", quota):
-                service.submit_generation(
-                    identity,
-                    client_task_id="route-task",
-                    prompt="cat",
-                    model="gpt-image-2",
-                    size=None,
-                    base_url="http://local.test",
-                )
-                wait_for_task(service, identity, "route-task", "success")
-            self.assertEqual(seen[0]["_identity"]["route_account_ids"], ["pool-1"])
-            self.assertTrue(seen[0]["_quota_already_reserved"])
-
-
 if __name__ == "__main__":
     unittest.main()

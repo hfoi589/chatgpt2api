@@ -11,7 +11,6 @@ from services.protocol.conversation import (
     collect_image_outputs,
     count_text_tokens,
     encode_images,
-    image_request_identity,
     reserve_image_request,
     settle_image_outputs,
     stream_image_chunks,
@@ -66,8 +65,6 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     encoded_images = encode_images(images)
     if not encoded_images:
         raise ImageGenerationError("image is required")
-    identity = image_request_identity(body)
-    route_account_ids = list(identity.get("route_account_ids") or []) if identity else []
     reservation = reserve_image_request(body, n)
     outputs = settle_image_outputs(stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
@@ -80,8 +77,6 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         images=encoded_images,
         message_as_error=True,
         progress_callback=progress_callback,
-        identity=identity,
-        route_account_ids=route_account_ids,
     )), reservation)
     if body.get("stream"):
         return stream_image_chunks(outputs)

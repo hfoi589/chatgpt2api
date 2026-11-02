@@ -308,8 +308,6 @@ class ConversationRequest:
     base_url: str | None = None
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
-    identity: dict[str, object] | None = None
-    route_account_ids: list[str] | None = None
 
 
 @dataclass
@@ -1325,7 +1323,6 @@ def _generate_single_image(
                 plan_type=plan_type,
                 source_type="codex" if codex_model else None,
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
-                route_account_ids=request.route_account_ids,
             )
         except RuntimeError as exc:
             raise ImageGenerationError(str(exc) or "image generation failed", account_email=account_email) from exc
@@ -1612,11 +1609,7 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
 
     if not emitted:
         if not last_error:
-            last_error = (
-                "no available image account in assigned route"
-                if request.route_account_ids
-                else "no account in the pool could generate images — check account quota and rate-limit status"
-            )
+            last_error = "no account in the pool could generate images — check account quota and rate-limit status"
         raise ImageGenerationError(image_stream_error_message(last_error), conversation_id="")
 
 
@@ -1654,12 +1647,7 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
 
 def image_request_identity(body: dict[str, Any]) -> dict[str, object] | None:
     identity = body.get("_identity")
-    if not isinstance(identity, dict):
-        return None
-    current = dict(identity)
-    route_getter = getattr(quota_service, "route_account_ids", None)
-    current["route_account_ids"] = route_getter(current) if callable(route_getter) else list(current.get("route_account_ids") or [])
-    return current
+    return identity if isinstance(identity, dict) else None
 
 
 def reserve_image_request(body: dict[str, Any], amount: int) -> ImageQuotaReservation | None:

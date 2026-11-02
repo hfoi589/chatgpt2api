@@ -14,7 +14,6 @@ from services.protocol.conversation import (
     count_message_text_tokens,
     count_text_tokens,
     encode_images,
-    image_request_identity,
     reserve_image_request,
     normalize_messages,
     stream_image_outputs_with_pool,
@@ -438,8 +437,6 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         images = None
     input_image_tokens = count_image_content_tokens(_input_image_parts(body.get("input")), model)
     tool = response_image_tool(body)
-    identity = image_request_identity(body)
-    route_account_ids = list(identity.get("route_account_ids") or []) if identity else []
     reservation = reserve_image_request(body, 1)
     image_outputs = settle_image_outputs(stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
@@ -448,8 +445,6 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         quality=str(tool.get("quality") or "auto"),
         response_format="b64_json",
         images=images,
-        identity=identity,
-        route_account_ids=route_account_ids,
     )), reservation)
     try:
         yield from stream_image_response(image_outputs, prompt, model, input_image_tokens, tool.get("size"), str(tool.get("quality") or "auto"))

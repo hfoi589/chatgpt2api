@@ -2,6 +2,7 @@
 .gitignore
 .idea
 .venv
+config.json
 __pycache__
 *.pyc
 *.pyo
