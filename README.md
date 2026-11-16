@@ -1,5 +1,7 @@
 <h1 align="center">ChatGPT2API</h1>
 
+> 当前 `main` 主线版本为 Go 版 `2.0.0-limit`，代码与部署说明见 [2.0-limit](2.0-limit/README.md)。仓库根目录保留 1.8 版本源码供迁移参考。
+
 
 <p align="center">ChatGPT2API 主要是对 ChatGPT 官网相关能力进行逆向整理与封装，提供面向 ChatGPT 图片生成、图片编辑、多图组图编辑场景的 OpenAI 兼容图片 API / 代理，并集成在线画图、号池管理、多种账号导入方式与 Docker 自托管部署能力。</p>
 
@@ -34,8 +36,9 @@
 ### Docker 运行
 
 ```bash
-git clone git@github.com:basketikun/chatgpt2api.git
+git clone git@github.com:hfoi589/chatgpt2api.git
 cd chatgpt2api
+cd 2.0-limit
 docker compose up -d
 ```
 
