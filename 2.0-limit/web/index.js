@@ -3,6 +3,16 @@ import dayjs from "dayjs";
 import { EventSourceParserStream } from "eventsource-parser/stream";
 
 /* ---------- 请求与登录态 ---------- */
+/** crypto.randomUUID 仅在 HTTPS/localhost 可用，HTTP 访问时回退到 getRandomValues。 */
+const uuid = () => {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+};
+
 const SESSION_KEY = "chatgpt2api_session";
 
 const session = {
@@ -102,7 +112,7 @@ function saveBlob(blob, name) {
 /** 只在失败、需要等待或需要用户处理时调用，成功状态由界面变化体现。 */
 function toast(text, type = "error", icon = "") {
   const store = Alpine.store("toast");
-  const item = { id: crypto.randomUUID(), text, type, icon };
+  const item = { id: uuid(), text, type, icon };
   store.items.push(item);
   setTimeout(() => store.items.splice(store.items.indexOf(item), 1), type === "error" ? 6000 : 4000);
 }
@@ -505,7 +515,7 @@ const running = (part) => part.status === "queued" || part.status === "running";
 const imagePart = (task, index, total, ratio) => ({ type: "image_task", task_id: String(task.id), index, total, ratio, status: task.status, progress: task.progress, elapsed_seconds: task.elapsed_seconds, duration_ms: task.duration_ms, url: task.results[0]?.url, error: task.error });
 const userContent = (text, images) => images.length ? [...(text ? [{ type: "text", text }] : []), ...images.map((image) => ({ type: "image_url", image_url: { url: image.url } }))] : text;
 const sizeOf = (settings) => settings.ratio === "auto" ? "auto" : ratios.find(([value]) => value === settings.ratio).slice(1, 3).join("x");
-const fromUrl = async (url, name) => ({ id: crypto.randomUUID(), name, url, file: await urlToFile(url, name) });
+const fromUrl = async (url, name) => ({ id: uuid(), name, url, file: await urlToFile(url, name) });
 
 /** 创作模式：每个模式对应的记录类型，第一个为默认类型。 */
 const creationModes = [
@@ -706,7 +716,7 @@ Alpine.data("chat", () => {
         const images = await Promise.all([...files].map(async (file) => {
           if (!file.type.startsWith("image/")) throw new Error(`${file.name} 不是图片文件`);
           if (file.size > 10 * 1024 * 1024) throw new Error(`${file.name} 超过 10MB`);
-          return { id: crypto.randomUUID(), name: file.name, url: await readDataUrl(file), file };
+          return { id: uuid(), name: file.name, url: await readDataUrl(file), file };
         }));
         this.images.push(...images);
       } catch (error) {
