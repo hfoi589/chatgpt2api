@@ -552,6 +552,7 @@ Alpine.data("chat", () => {
     audio: null,
     recording: false,
     quota: null,
+    usage: null,
     settings: { ratio: "1:1", count: 1 },
     input: "",
     images: [],
@@ -577,12 +578,24 @@ Alpine.data("chat", () => {
     },
 
     async loadQuota() {
-      if (session.get().role !== "admin") return;
       try {
-        this.quota = (await api("/api/accounts/summary")).quota;
+        if (session.get().role !== "admin") this.usage = await api("/api/auth/me/usage");
+        else this.quota = (await api("/api/accounts/summary")).quota;
       } catch (error) {
         toast(error.message);
       }
+    },
+
+    /** 普通用户的图片额度，按「已用/上限」展示，未设上限显示「不限」。 */
+    get usageParts() {
+      const u = this.usage;
+      if (!u) return [];
+      const used = (item) => item.limit == null ? "不限" : `${item.used}/${item.limit}`;
+      return [
+        { label: "今日", text: used(u.daily), tip: u.daily.reset_at ? `重置时间 ${new Date(u.daily.reset_at).toLocaleString()}` : "每日图片额度" },
+        { label: "本周", text: used(u.weekly), tip: u.weekly.reset_at ? `重置时间 ${new Date(u.weekly.reset_at).toLocaleString()}` : "每周图片额度" },
+        { label: "总剩余", text: u.total.remaining == null ? "不限" : String(u.total.remaining), tip: "总图片剩余额度" },
+      ];
     },
 
     get active() {

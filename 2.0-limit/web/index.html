@@ -477,6 +477,13 @@
                       </div>
                     </div>
                     <span class="row row-xs text-xs text-muted tooltip" data-tip="可用账号的剩余生图额度" x-show="$store.app.admin"><ui-icon name="coins" class="icon-sm"></ui-icon>剩余 <span class="num" x-text="quota === null ? '—' : $num(quota)"></span></span>
+                <template x-if="!$store.app.admin && usage">
+                  <span class="row row-xs row-wrap text-xs text-muted" :class="{ 'text-error': usage.blocked }">
+                    <ui-icon name="coins" class="icon-sm"></ui-icon>
+                    <template x-for="part in usageParts" :key="part.label"><span class="tooltip" :data-tip="part.tip"><span x-text="part.label"></span> <span class="num" x-text="part.text"></span></span></template>
+                    <span x-show="usage.blocked" x-text="usage.reason"></span>
+                  </span>
+                </template>
                   </div>
                 </template>
 
